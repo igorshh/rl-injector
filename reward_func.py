@@ -83,10 +83,33 @@ class AgentDojoReward:
         self.all_target_model_name_or_path = config.target_model_name_or_path.split(";")
         self.all_pipline = []
 
-        for curr_model in self.all_target_model_name_or_path:
+        # Per-target endpoint. agentdojo's `vllm_parsed` provider reads a single global
+        # LOCAL_LLM_PORT, so several locally served targets would all be built against the
+        # SAME server and the multi-target vote would silently collapse to one model. Each
+        # --target_model_url entry is PORT[:MODEL_ID], positionally matched, e.g.
+        #     --target_model_name_or_path "vllm_parsed;vllm_parsed" \
+        #     --target_model_url "8010:v2base;8011:v2gates0025"
+        # MODEL_ID pins the model rather than taking /v1/models data[0], which is whichever
+        # model the server happens to list first -- getting that wrong evaluates the wrong
+        # weights and looks entirely normal.
+        all_urls = (config.target_model_url or "").split(";")
+        for i, curr_model in enumerate(self.all_target_model_name_or_path):
+            model_id = None
+            spec = all_urls[i] if i < len(all_urls) else ""
+            if curr_model == "vllm_parsed" and spec and spec != "dummy":
+                port, _, model_id = spec.partition(":")
+                # get_llm() reads the env var eagerly and binds the resulting client, so the
+                # value only has to be correct while this pipeline is constructed.
+                os.environ["LOCAL_LLM_PORT"] = port.strip()
+                model_id = model_id.strip() or None
+                print(f"[AgentDojoReward] target {i}: port={port.strip()} model_id={model_id}")
+
             curr_pipeline = AgentPipeline.from_config(
                 PipelineConfig(
                     llm=curr_model,
+                    # Required field in agentdojo >=0.1.35; omitting it raises
+                    # ValidationError: model_id Field required.
+                    model_id=model_id,
                     defense=None,
                     system_message_name=None,
                     system_message=None,

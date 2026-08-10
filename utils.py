@@ -76,7 +76,9 @@ class AgentDojoDataset(Dataset):
         self.dataset = json.load(open(data_pth, "r"))
         self.sys_prompt = ATTACKER_SYS_PROMPT
 
-        benchmark_version = "v1.2.1"
+        # v1.2.2 to match the gpt-oss sweep this attacks; v1.2.1 has a different
+        # task set, so ASRs would not be comparable.
+        benchmark_version = "v1.2.2"
         all_suite_names = tuple(get_suites(benchmark_version).keys())
         all_suites = {}
         all_user_tasks = {}

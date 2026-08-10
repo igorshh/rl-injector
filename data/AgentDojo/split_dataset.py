@@ -10,7 +10,9 @@ import itertools
 
 from agentdojo.scripts.benchmark import get_suites, get_suite
 
-benchmark_version = "v1.2.1"
+# v1.2.2 to match the gpt-oss sweep this attacks; v1.2.1 has a different
+# task set, so ASRs would not be comparable.
+benchmark_version = "v1.2.2"
 
 all_suites = tuple(get_suites(benchmark_version).keys())
 

@@ -66,7 +66,9 @@ def main():
 
     # Load all necessary stuff for AgentDojo
     all_agentdojo_attacks = list(ATTACKS.keys())
-    benchmark_version = "v1.2.1"
+    # v1.2.2 to match the gpt-oss sweep this attacks; v1.2.1 has a different
+    # task set, so ASRs would not be comparable.
+    benchmark_version = "v1.2.2"
     all_suite_names = tuple(get_suites(benchmark_version).keys())
     all_suites = {}
     all_user_tasks = {}
