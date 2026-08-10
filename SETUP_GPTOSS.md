@@ -21,6 +21,30 @@ Every number in the sweep was produced with those, so results are only comparabl
 uv pip install -e ~/agentdojo-fork      # NOT ./AgentDojo
 ```
 
+## Secrets / wandb
+
+`.env` is a copy of `prompt_injection_interp/.env` and is **gitignored** (`.gitignore:131`).
+It holds `WANDB_API_KEY`, `WANDB_ENTITY=ffuuugor` and `WANDB_PROJECT=rl-hammer-gptoss`.
+`train.py` and `agentdojo_eval.py` call `load_env()` (`env_setup.py`) at import, so the keys
+are picked up however the run is launched -- no need to remember
+`set -a; source .env; set +a`. Already-exported variables win, so you can override the
+project per run without editing the file.
+
+It is a copy, not a link: rotating the key means updating both files.
+
+**HF auth is not in `.env`.** The token is the usual `~/.cache/huggingface/token`, and the
+cache paths (`HF_HUB_CACHE` -> `/mnt/data/artifacts/hf_cache`) come from the ambient
+environment. Do not set `HF_HOME` -- it moves the token path and silently de-authenticates,
+so a private repo 404s as though it did not exist.
+
+Training reporting is TRL's, so pass `--report_to wandb --run_name ...`, and
+`--log_completions True --num_completions_to_print 8` to get the generated injections into
+the run. `agentdojo_eval.py` logs its own table (`adv_goal`, `attacker_output`,
+`attacker_adv_prompt`, `agentdojo_output`, `if_attack_success`) plus `attack_success_rate`
+and `utility_success_rate` -- but under its own `--wandb_project_name`, which defaults to
+`RL-Hammer`. Pass `--wandb_project_name rl-hammer-gptoss` or evals land in a different
+project from the training runs.
+
 ## Serving a target
 
 Same launch path as the sweep. Channels must be computed **server-side**, so the target has

@@ -32,6 +32,11 @@ from config import EvalConfig
 from utils import ATTACKER_SYS_PROMPT
 from reward_func import extract_attack_prompt, AgentDojoReward
 
+# Load .env (wandb keys) before anything reads the environment.
+from env_setup import load_env
+
+load_env()
+
 
 def delete_vllm_model(model):
     destroy_model_parallel()

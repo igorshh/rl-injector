@@ -3,6 +3,11 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
+# Load .env (wandb keys) before anything reads the environment.
+from env_setup import load_env
+
+load_env()
+
 from trl import TrlParser, ModelConfig, GRPOTrainer
 from peft import LoraConfig
 
