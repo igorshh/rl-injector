@@ -82,6 +82,10 @@ def main():
     pipeline = AgentPipeline.from_config(
         PipelineConfig(
             llm=args.target_model_name_or_path,
+            # Required in agentdojo >=0.1.35. For a locally served target pass the id via
+            # --target_model_id so /v1/models data[0] is not used, which is whichever model
+            # the server lists first.
+            model_id=getattr(args, "target_model_id", None),
             defense=None,
             system_message_name=None,
             system_message=None,

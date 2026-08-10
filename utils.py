@@ -92,6 +92,10 @@ class AgentDojoDataset(Dataset):
         pipeline = AgentPipeline.from_config(
             PipelineConfig(
                 llm=target_model_name_or_path,
+                # Required in agentdojo >=0.1.35. This pipeline is only used to expand the
+                # default injection text for each (task, injection) pair -- it never queries
+                # the model -- so the id does not need pinning here.
+                model_id=None,
                 defense=None,
                 system_message_name=None,
                 system_message=None,

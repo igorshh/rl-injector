@@ -46,6 +46,8 @@ class EvalConfig:
     attacker_model_name_or_path: str = "meta-llama/Llama-3.1-8B-Instruct"
     attacker_base_model_name_or_path: str = "meta-llama/Llama-3.1-8B-Instruct"
     target_model_name_or_path: str = "meta-llama/Llama-3.1-8B-Instruct"
+    # Pins the served model for local targets; see agentdojo_eval.py.
+    target_model_id: str = None
     reasoning_effort: str = field(default="minimal")  # minimal, low, medium, high
     attacker_model_dtype: str = "bfloat16"
     target_model_dtype: str = "bfloat16"
