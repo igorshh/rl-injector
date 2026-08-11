@@ -546,7 +546,11 @@ class InjecAgentToolCallingReward:
 
         self._step = getattr(self, "_step", 0) + 1
         rank = os.environ.get("RANK", os.environ.get("LOCAL_RANK", "0"))
-        path = os.path.join("logs", f"attacks_rank{rank}.jsonl")
+        # The arm belongs in the filename: concurrent runs share RLDIR, so four jobs x two
+        # ranks were appending to one pair of files. The rows stayed separable by target name
+        # but eight writers on two files is not something to rely on.
+        arm = names[0].replace("/", "_") if names else "unknown"
+        path = os.path.join("logs", f"attacks_{arm}_rank{rank}.jsonl")
         names = [n.split("/")[-1] for n in self.all_target_model_name_or_path]
         rows = []
         for i in range(len(attacks)):
