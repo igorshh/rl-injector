@@ -549,9 +549,13 @@ class InjecAgentToolCallingReward:
         # The arm belongs in the filename: concurrent runs share RLDIR, so four jobs x two
         # ranks were appending to one pair of files. The rows stayed separable by target name
         # but eight writers on two files is not something to rely on.
-        arm = names[0].replace("/", "_") if names else "unknown"
-        path = os.path.join("logs", f"attacks_{arm}_rank{rank}.jsonl")
         names = [n.split("/")[-1] for n in self.all_target_model_name_or_path]
+        arm = names[0].replace("/", "_") if names else "unknown"
+        # ATTACK_LOG_TAG distinguishes runs that share a robust target but differ otherwise --
+        # e.g. gates-vs-llama and gates-vs-v2base would both be "v2gates0025_ep3".
+        tag = os.environ.get("ATTACK_LOG_TAG", "")
+        tag = f"_{tag}" if tag else ""
+        path = os.path.join("logs", f"attacks_{arm}{tag}_rank{rank}.jsonl")
         rows = []
         for i in range(len(attacks)):
             rows.append({
@@ -582,12 +586,24 @@ class InjecAgentToolCallingReward:
                 return
             cols = ["step", "goal", "attack", "reward"] + names
             table = wandb.Table(columns=cols)
-            # Successes first: at low ASR a head-of-list sample is almost all failures.
-            ranked = sorted(range(len(attacks)), key=lambda i: -rewards[i])[:16]
-            for i in ranked:
+            # Select on the ROBUST target (index 0), not on reward. Reward is the joint soft
+            # score, so sorting by it surfaces attacks that only broke the easy target -- which
+            # says nothing about the defense under test. These are the rows worth reading.
+            hits = [i for i in range(len(attacks)) if verdicts[0][i] == "succ"]
+            kind = "robust"
+            if not hits:
+                # Nothing broke the robust target this epoch, which is the common case early on
+                # and is itself the finding. Show easy-target successes instead of a blank
+                # panel; the verdict columns make which is which unambiguous.
+                hits = [i for i in range(len(attacks))
+                        if any(verdicts[j][i] == "succ" for j in range(1, len(verdicts)))]
+                kind = "easy-only"
+            for i in hits[:16]:
                 table.add_data(self._step, goals[i], attacks[i], rewards[i],
                                *[verdicts[j][i] for j in range(len(verdicts))])
-            wandb.log({f"attacks/epoch_{self._step // every}": table}, commit=False)
+            wandb.log({f"attacks/epoch_{self._step // every}_{kind}": table}, commit=False)
+            print(f"[reward] logged {min(len(hits), 16)} {kind} attacks to wandb "
+                  f"(epoch ~{self._step // every})", flush=True)
         except Exception:  # noqa: BLE001
             pass
 
