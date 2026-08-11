@@ -463,6 +463,7 @@ class InjecAgentToolCallingReward:
         # Step 2: Judge evaluation
         rewards = [0.0] * len(prompts)
         _succ = [0] * len(all_outputs)          # per-target successes, for the ASR metric
+        _verdict = [["?"] * len(prompts) for _ in all_outputs]   # per-target, per-rollout
         for j, model_outputs in enumerate(all_outputs):
             for i, curr_row in enumerate(model_outputs):
                 curr_data_row = data[i]
@@ -484,6 +485,7 @@ class InjecAgentToolCallingReward:
                     )
 
                 judge_model_output = eval_result["eval"]
+                _verdict[j][i] = judge_model_output
 
                 if judge_model_output == "succ":
                     _succ[j] += 1
@@ -525,7 +527,65 @@ class InjecAgentToolCallingReward:
         except Exception:  # noqa: BLE001 - a metric must never fail a training step
             pass
 
+        self._record_attacks(adv_goals, adv_prompts, rewards, _verdict)
         return rewards
+
+    def _record_attacks(self, goals, attacks, rewards, verdicts):
+        """Append this step's attacks, with per-target verdicts, to a JSONL.
+
+        The attacks are the object of the exercise and nothing else preserves them: TRL logs
+        completion *lengths* and reward statistics, not text, and a checkpoint only tells you
+        what the policy became, not what it was emitting on the way. Written per rank, since
+        both processes score their own rollouts and a shared file would interleave.
+
+        Every rollout is kept rather than a sample. At ~80 per step and ~1240 steps that is
+        under 100 MB, and the interesting ones are rare -- a sample would mostly miss the
+        successes, which are the whole point.
+        """
+        import json as _json
+
+        self._step = getattr(self, "_step", 0) + 1
+        rank = os.environ.get("RANK", os.environ.get("LOCAL_RANK", "0"))
+        path = os.path.join("logs", f"attacks_rank{rank}.jsonl")
+        names = [n.split("/")[-1] for n in self.all_target_model_name_or_path]
+        rows = []
+        for i in range(len(attacks)):
+            rows.append({
+                "step": self._step,
+                "goal": goals[i],
+                "attack": attacks[i],
+                "reward": rewards[i],
+                "verdicts": {names[j]: verdicts[j][i] for j in range(len(verdicts))},
+            })
+        try:
+            os.makedirs("logs", exist_ok=True)
+            with open(path, "a") as f:
+                for r in rows:
+                    f.write(_json.dumps(r) + "\n")
+        except Exception:  # noqa: BLE001 - recording must never fail a training step
+            pass
+
+        # A browsable sample in wandb once per epoch. ATTACK_TABLE_EVERY defaults to 31,
+        # which is 310 training goals / 10 goals per step -- i.e. one epoch at the configured
+        # batch. Set it if either changes.
+        every = int(os.environ.get("ATTACK_TABLE_EVERY", "31"))
+        if self._step % every != 0:
+            return
+        try:
+            import wandb
+
+            if wandb.run is None:
+                return
+            cols = ["step", "goal", "attack", "reward"] + names
+            table = wandb.Table(columns=cols)
+            # Successes first: at low ASR a head-of-list sample is almost all failures.
+            ranked = sorted(range(len(attacks)), key=lambda i: -rewards[i])[:16]
+            for i in ranked:
+                table.add_data(self._step, goals[i], attacks[i], rewards[i],
+                               *[verdicts[j][i] for j in range(len(verdicts))])
+            wandb.log({f"attacks/epoch_{self._step // every}": table}, commit=False)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 class BLEUDiversityReward:
