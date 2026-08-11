@@ -131,8 +131,30 @@ class InjecAgentToolCallingReward:
         self.all_target_client = []
         self.all_target_tokenizer = []
 
+        # A target is "locally served" when its name has no "/" but its URL is a real
+        # http endpoint. That is our own server: interppi.serve is OpenAI-compatible and
+        # answers to --model-name (e.g. "v2base"), which is deliberately not an HF path.
+        #
+        # This branch has to exist. Without it the only local option is a slash-bearing HF
+        # id, which routes to run_target_model -- the *prompted* format, where the whole
+        # scratchpad including the injection goes into one `user` message. Our channel
+        # tokenizer marks user content trusted, so a gated arm would be scored with its
+        # defense inert, and the numbers would not be comparable to our static InjecAgent
+        # runs, which used native tool calling. (Note upstream already works around the same
+        # problem for SecAlign by special-casing role="input" in run_target_model.)
+        self.is_local_openai = [
+            "/" not in name and str(url).startswith("http")
+            for name, url in zip(self.all_target_model_name_or_path,
+                                 self.all_target_model_url)
+        ]
+
         for i, model_name in enumerate(self.all_target_model_name_or_path):
-            if "/" not in model_name:
+            if self.is_local_openai[i]:
+                print(f"[reward] target {i}: local OpenAI-compatible {model_name} at "
+                      f"{self.all_target_model_url[i]} (native tool calling)", flush=True)
+                client = OpenAI(base_url=self.all_target_model_url[i], api_key="EMPTY")
+                tokenizer = None
+            elif "/" not in model_name:
                 # Azure API
                 if "gpt" in model_name.lower():
                     env_name = model_name.upper().replace("-", "_")
@@ -426,7 +448,8 @@ class InjecAgentToolCallingReward:
             futures = []
 
             for i in range(len(self.all_target_client)):
-                if "/" not in self.all_target_model_name_or_path[i]:
+                if self.is_local_openai[i] or "/" not in self.all_target_model_name_or_path[i]:
+                    # Native tool calling, for hosted APIs and for our own server alike.
                     futures.append(
                         executor.submit(self.run_gpt_target_model, i, user_inputs_gpt)
                     )
