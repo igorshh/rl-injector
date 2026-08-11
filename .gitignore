@@ -189,3 +189,7 @@ data/InjecAgent/raw/*
 data/InjecAgent/tools.json
 
 data/AgentDojo/dataset/*
+data/InjecAgent/raw/
+data/InjecAgent/dataset/
+logs/
+checkpoints/
