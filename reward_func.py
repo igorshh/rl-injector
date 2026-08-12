@@ -584,7 +584,7 @@ class InjecAgentToolCallingReward:
 
             if wandb.run is None:
                 return
-            cols = ["step", "goal", "attack", "reward"] + names
+            cols = ["step", "epoch", "kind", "goal", "attack", "reward"] + names
             table = wandb.Table(columns=cols)
             # Select on the ROBUST target (index 0), not on reward. Reward is the joint soft
             # score, so sorting by it surfaces attacks that only broke the easy target -- which
@@ -599,9 +599,15 @@ class InjecAgentToolCallingReward:
                         if any(verdicts[j][i] == "succ" for j in range(1, len(verdicts)))]
                 kind = "easy-only"
             for i in hits[:16]:
-                table.add_data(self._step, goals[i], attacks[i], rewards[i],
+                table.add_data(self._step, self._step // every, kind, goals[i], attacks[i],
+                               rewards[i],
                                *[verdicts[j][i] for j in range(len(verdicts))])
-            wandb.log({f"attacks/epoch_{self._step // every}_{kind}": table}, commit=False)
+            # One fixed key, not one per epoch. Distinct keys produce a separate one-shot
+            # panel per epoch, filed under Tables/Artifacts rather than Charts, which is
+            # effectively invisible in the UI. A single key gives one browsable panel whose
+            # versions step through training, and the step/kind columns say which epoch a row
+            # came from.
+            wandb.log({"attacks/samples": table}, commit=False)
             print(f"[reward] logged {min(len(hits), 16)} {kind} attacks to wandb "
                   f"(epoch ~{self._step // every})", flush=True)
         except Exception:  # noqa: BLE001
