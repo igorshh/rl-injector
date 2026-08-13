@@ -46,6 +46,9 @@ class EvalConfig:
     attacker_model_name_or_path: str = "meta-llama/Llama-3.1-8B-Instruct"
     attacker_base_model_name_or_path: str = "meta-llama/Llama-3.1-8B-Instruct"
     target_model_name_or_path: str = "meta-llama/Llama-3.1-8B-Instruct"
+    # EvalConfig lacked this while LocalGRPOConfig has it, so a target that is an
+    # OpenAI-compatible endpoint could be trained against but not evaluated against.
+    target_model_url: str = field(default="http://localhost:8000/v1")
     reasoning_effort: str = field(default="minimal")  # minimal, low, medium, high
     attacker_model_dtype: str = "bfloat16"
     target_model_dtype: str = "bfloat16"

@@ -65,6 +65,11 @@ def delete_vllm_model(model):
     ray.shutdown()
 
 
+# Set once the target is known to be one of ours; interppi.serve accepts reasoning_effort and
+# renders it into the Harmony system block, which is the only way to vary it per request.
+SEND_REASONING_EFFORT = False
+
+
 def fetch_with_retries(
     client,
     messages,
@@ -90,7 +95,7 @@ def fetch_with_retries(
                 # Convert to openai output format
                 completion = anthropic_completion_to_openai(completion)
             else:
-                if "gpt-5" in model_name.lower():
+                if "gpt-5" in model_name.lower() or SEND_REASONING_EFFORT:
                     completion = client.chat.completions.create(
                         model=model_name,
                         messages=messages,
@@ -261,8 +266,23 @@ def main():
         with open(saved_adv_prompts_path, "w") as f:
             json.dump(adv_prompt_results, f, indent=4)
 
-    # Load target model
-    if (
+    # Load target model.
+    # Same rule as reward_func: a slash-free name with an http URL is one of our own servers,
+    # OpenAI-compatible and answering to --model-name. It must take the native tool-calling
+    # path -- the alternative branch inlines the scratchpad into a user message, which our
+    # channel tokenizer marks trusted, so a defended arm would be evaluated with its defense
+    # inert.
+    is_local_openai = ("/" not in args.target_model_name_or_path
+                       and str(args.target_model_url).startswith("http"))
+    if is_local_openai:
+        global SEND_REASONING_EFFORT
+        SEND_REASONING_EFFORT = True
+        client = OpenAI(base_url=args.target_model_url, api_key="EMPTY")
+        model_name = args.target_model_name_or_path
+        tokenizer = None
+        print(f"[eval] local OpenAI-compatible target {model_name} at {args.target_model_url}",
+              flush=True)
+    elif (
         "/" not in args.target_model_name_or_path
         or "anthropic" in args.target_model_name_or_path.lower()
     ):
