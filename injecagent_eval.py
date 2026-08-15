@@ -414,12 +414,20 @@ def main():
                 all_completions = [f.result() for f in futures]
             target_model_output_texts = []
             target_model_output_tool_calls = []
+            # The whole message object as the server returned it, extras included. gpt-oss
+            # puts all its deliberation on the analysis channel and returns content=None
+            # whenever it calls a tool, so storing only `content` discards the entire
+            # response and leaves "MODEL_OUTPUT: None" behind. model_dump() keeps
+            # reasoning_content without this code having to know the field names.
+            target_messages = []
             for completion in all_completions:
-                target_model_output_texts.append(completion.choices[0].message.content)
-                tool_calls = completion.choices[0].message.tool_calls
+                message = completion.choices[0].message
+                target_model_output_texts.append(message.content)
+                tool_calls = message.tool_calls
                 if isinstance(tool_calls, List):
                     tool_calls = [item.model_dump() for item in tool_calls]
                 target_model_output_tool_calls.append(tool_calls)
+                target_messages.append(message.model_dump())
 
             for i in range(len(adv_prompt_batch["adv_goal"])):
                 target_model_results.append(
@@ -431,6 +439,7 @@ def main():
                         ],
                         "target_model_output": target_model_output_texts[i],
                         "target_tool_calls": target_model_output_tool_calls[i],
+                        "target_message": target_messages[i],
                     }
                 )
 
@@ -455,7 +464,11 @@ def main():
                     "adv_goal": curr_row["adv_goal"],
                     "attacker_output": curr_row["attacker_output"],
                     "attacker_adv_prompt": curr_row["attacker_adv_prompt"],
-                    "target_model_output": f"MODEL_OUTPUT: {curr_row["target_model_output"]}\n\nTOOL_CALLS: {curr_row["target_tool_calls"]}",
+                    # The response message verbatim, not a flattened string. The judge above
+                    # already took content and tool_calls as separate arguments, so nothing
+                    # depends on the "MODEL_OUTPUT:/TOOL_CALLS:" rendering -- and that form
+                    # silently dropped reasoning_content with everything else it did not name.
+                    "target_model_output": curr_row["target_message"],
                     "judge_model_output": judge_model_output,
                     "if_attack_success": if_attack_success,
                 }
