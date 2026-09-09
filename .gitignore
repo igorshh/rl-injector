@@ -184,12 +184,7 @@ saved_adv_prompts/
 *.lock
 runs/
 
-data/InjecAgent/dataset/*
-data/InjecAgent/raw/*
-data/InjecAgent/tools.json
 
-data/AgentDojo/dataset/*
-data/InjecAgent/raw/
 data/InjecAgent/dataset/
 logs/
 checkpoints/

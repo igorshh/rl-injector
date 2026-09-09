@@ -26,6 +26,8 @@ import os
 from typing import List
 import concurrent.futures
 import time
+import threading
+import collections
 
 from openai import AzureOpenAI, OpenAI
 from anthropic import AnthropicBedrock, RateLimitError
@@ -70,21 +72,54 @@ def delete_vllm_model(model):
 SEND_REASONING_EFFORT = False
 
 
+# ---------------------------------------------------------------------------
+# Client-side rate limiting for capped remote targets.
+#
+# OpenRouter caps some models per-model (measured 2026-09-07: 20 requests/minute for
+# gpt-5.6-luna, gpt-5, gpt-4o, claude-haiku-4.5; others uncapped). A GRPO step fires all 80
+# rollouts at once, so against a capped model ~60 of them 429 and then sit in exponential
+# backoff -- wasted wall time, and a retry budget away from silently scoring "attack failed".
+# Pacing here instead means zero rejected requests: a trailing-60s window admits at most
+# OPENROUTER_RPM starts. Set OPENROUTER_RPM=0 (default) to disable, e.g. for a local target.
+# ---------------------------------------------------------------------------
+_RATE_RPM = int(os.environ.get("OPENROUTER_RPM", "0") or 0)
+_RATE_LOCK = threading.Lock()
+_RATE_STARTS = collections.deque()
+
+
+def _throttle(client) -> None:
+    """Block until this request may start, if the client points at a capped remote host."""
+    if _RATE_RPM <= 0 or "openrouter.ai" not in str(getattr(client, "base_url", "")):
+        return
+    while True:
+        with _RATE_LOCK:
+            now = time.time()
+            while _RATE_STARTS and now - _RATE_STARTS[0] >= 60.0:
+                _RATE_STARTS.popleft()
+            if len(_RATE_STARTS) < _RATE_RPM:
+                _RATE_STARTS.append(now)
+                return
+            wait = 60.0 - (now - _RATE_STARTS[0]) + 0.05
+        time.sleep(wait)
+
+
 def fetch_with_retries(
     client,
     messages,
     tools,
     model_name,
-    max_retries=5,
-    reasoning_effort="minimal",
+    max_retries=8,
+    reasoning_effort=None,
 ):
-    if "anthropic" in model_name.lower():
+    use_anthropic_api = isinstance(client, AnthropicBedrock)
+    if use_anthropic_api:
         messages[2] = to_anthropic_tool_call(messages[2])
         messages[3] = to_anthropic_tool_result(messages[3])
 
     for attempt in range(max_retries):
         try:
-            if "anthropic" in model_name.lower():
+            _throttle(client)
+            if use_anthropic_api:
                 completion = client.messages.create(
                     model=model_name,
                     system=messages[0]["content"],
@@ -95,7 +130,8 @@ def fetch_with_retries(
                 # Convert to openai output format
                 completion = anthropic_completion_to_openai(completion)
             else:
-                if "gpt-5" in model_name.lower() or SEND_REASONING_EFFORT:
+                if reasoning_effort and ("gpt-5" in model_name.lower() or SEND_REASONING_EFFORT) \
+                        and not model_name.lower().startswith("anthropic/"):
                     completion = client.chat.completions.create(
                         model=model_name,
                         messages=messages,
@@ -108,23 +144,26 @@ def fetch_with_retries(
                     )
 
             return completion
-        except RateLimitError as e:
-            if attempt < max_retries - 1:
-                wait_time = 10**attempt
-                print(
-                    f"Rate limit error encountered. Retrying in {wait_time} seconds..."
-                )
-                time.sleep(wait_time)
-            else:
-                print(f"Repeated rate limit errors: {e}")
-                raise e
         except Exception as e:
-            if hasattr(e, "message") and "expired" in e.message:
+            if hasattr(e, "message") and isinstance(getattr(e, "message", None), str) \
+                    and "expired" in e.message:
                 # Claude api token expired
                 raise e
-
-            if attempt < max_retries - 1:
-                pass
+            # The imported RateLimitError is anthropic's. An OpenAI/OpenRouter 429 is a
+            # different class and used to fall through to the generic branch below, which
+            # retried with NO delay and burned every attempt in milliseconds -> "" -> the
+            # caller crashed on completion.choices. Treat anything that looks like a rate
+            # limit as one and back off (OpenRouter caps new accounts at 20 rpm).
+            is_rate_limit = (isinstance(e, RateLimitError)
+                             or getattr(e, "status_code", None) == 429
+                             or "429" in str(e) or "rate limit" in str(e).lower())
+            if is_rate_limit and attempt < max_retries - 1:
+                wait_time = min(60, 5 * (2 ** attempt))
+                print(f"Rate limited; retrying in {wait_time}s "
+                      f"(attempt {attempt + 1}/{max_retries})", flush=True)
+                time.sleep(wait_time)
+            elif attempt < max_retries - 1:
+                time.sleep(2)
             else:
                 print(f"Skipping due to error: {e}")
                 return ""
@@ -263,8 +302,14 @@ def main():
 
         # Save the adversarial prompts
         os.makedirs(f"saved_adv_prompts/{model_name}/{val_set_name}", exist_ok=True)
-        with open(saved_adv_prompts_path, "w") as f:
+        # Atomic write: the cache is keyed on --save_name, which we deliberately share across
+        # TARGETS (the attacks do not depend on the target -- generation only sees the attacker
+        # goal), so several eval jobs can be writing the same path concurrently. A plain open(w)
+        # would let one job read a half-written file.
+        _tmp = f"{saved_adv_prompts_path}.{os.getpid()}.tmp"
+        with open(_tmp, "w") as f:
             json.dump(adv_prompt_results, f, indent=4)
+        os.replace(_tmp, saved_adv_prompts_path)
 
     # Load target model.
     # Same rule as reward_func: a slash-free name with an http URL is one of our own servers,
@@ -272,10 +317,26 @@ def main():
     # path -- the alternative branch inlines the scratchpad into a user message, which our
     # channel tokenizer marks trusted, so a defended arm would be evaluated with its defense
     # inert.
+    # OpenRouter is OpenAI-compatible but its model ids contain a slash ("openai/gpt-5.6-luna"),
+    # so the slash rule below would misfile it as a local HF checkpoint and send it down the
+    # PROMPTED path. Detect it by URL, authenticate with the real key, and keep native tool
+    # calling so the numbers are comparable with our other InjecAgent columns.
+    is_openrouter = "openrouter.ai" in str(args.target_model_url)
     is_local_openai = ("/" not in args.target_model_name_or_path
                        and str(args.target_model_url).startswith("http"))
-    if is_local_openai:
-        global SEND_REASONING_EFFORT
+    global SEND_REASONING_EFFORT
+    if is_openrouter:
+        SEND_REASONING_EFFORT = bool(args.reasoning_effort) and args.reasoning_effort != "none"
+        key = os.environ.get("OPENROUTER_API_KEY")
+        if not key:
+            raise SystemExit("OPENROUTER_API_KEY is not set")
+        client = OpenAI(base_url=args.target_model_url, api_key=key)
+        model_name = args.target_model_name_or_path
+        tokenizer = None
+        print(f"[eval] OpenRouter target {model_name} at {args.target_model_url} "
+              f"(native tool calling, reasoning_effort={args.reasoning_effort if SEND_REASONING_EFFORT else 'omitted'})",
+              flush=True)
+    elif is_local_openai:
         SEND_REASONING_EFFORT = True
         client = OpenAI(base_url=args.target_model_url, api_key="EMPTY")
         model_name = args.target_model_name_or_path
@@ -341,7 +402,8 @@ def main():
     )
 
     if (
-        "/" not in args.target_model_name_or_path
+        is_openrouter
+        or "/" not in args.target_model_name_or_path
         or "anthropic" in args.target_model_name_or_path.lower()
     ):
         tool_dict = injecagent_get_tool_dict(gpt_format=True)

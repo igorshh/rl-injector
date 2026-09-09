@@ -9,6 +9,8 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 from typing import List
 import time
+import threading
+import collections
 import numpy as np
 import random
 from functools import partial
@@ -120,6 +122,37 @@ def if_judge_success(judge_output):
     return "yes" in judge_output.lower() or "unsafe" in judge_output.lower()
 
 
+# ---------------------------------------------------------------------------
+# Client-side rate limiting for capped remote targets.
+#
+# OpenRouter caps some models per-model (measured 2026-09-07: 20 requests/minute for
+# gpt-5.6-luna, gpt-5, gpt-4o, claude-haiku-4.5; others uncapped). A GRPO step fires all 80
+# rollouts at once, so against a capped model ~60 of them 429 and then sit in exponential
+# backoff -- wasted wall time, and a retry budget away from silently scoring "attack failed".
+# Pacing here instead means zero rejected requests: a trailing-60s window admits at most
+# OPENROUTER_RPM starts. Set OPENROUTER_RPM=0 (default) to disable, e.g. for a local target.
+# ---------------------------------------------------------------------------
+_RATE_RPM = int(os.environ.get("OPENROUTER_RPM", "0") or 0)
+_RATE_LOCK = threading.Lock()
+_RATE_STARTS = collections.deque()
+
+
+def _throttle(client) -> None:
+    """Block until this request may start, if the client points at a capped remote host."""
+    if _RATE_RPM <= 0 or "openrouter.ai" not in str(getattr(client, "base_url", "")):
+        return
+    while True:
+        with _RATE_LOCK:
+            now = time.time()
+            while _RATE_STARTS and now - _RATE_STARTS[0] >= 60.0:
+                _RATE_STARTS.popleft()
+            if len(_RATE_STARTS) < _RATE_RPM:
+                _RATE_STARTS.append(now)
+                return
+            wait = 60.0 - (now - _RATE_STARTS[0]) + 0.05
+        time.sleep(wait)
+
+
 class InjecAgentToolCallingReward:
     def __init__(self, config):
         self.__name__ = "InjecAgentToolCallingReward"
@@ -128,6 +161,11 @@ class InjecAgentToolCallingReward:
         # Load all target models and tokenizers
         self.all_target_model_name_or_path = config.target_model_name_or_path.split(";")
         self.all_target_model_url = config.target_model_url.split(";")
+        # Announce the effort the API targets will receive, so a run log records it. (Local
+        # gpt-oss servers take effort from their own --reasoning-effort flag, not from here.)
+        eff = getattr(config, "reasoning_effort", None)
+        print(f"[reward] reasoning_effort for gpt-5* API targets: "
+              f"{eff if eff else 'omitted -> model default (luna: medium)'}", flush=True)
         self.all_target_client = []
         self.all_target_tokenizer = []
 
@@ -147,9 +185,22 @@ class InjecAgentToolCallingReward:
             for name, url in zip(self.all_target_model_name_or_path,
                                  self.all_target_model_url)
         ]
+        # OpenRouter is OpenAI-compatible but its ids carry a slash ("openai/gpt-4o-mini"), so
+        # the slash rule above would misfile it as a local HF checkpoint and send it down the
+        # PROMPTED path (injection in a trusted user message). Detect by URL, authenticate with
+        # the real key, and keep native tool calling so the reward matches our other columns.
+        self.is_openrouter = ["openrouter.ai" in str(url) for url in self.all_target_model_url]
 
         for i, model_name in enumerate(self.all_target_model_name_or_path):
-            if self.is_local_openai[i]:
+            if self.is_openrouter[i]:
+                key = os.environ.get("OPENROUTER_API_KEY")
+                if not key:
+                    raise ValueError("OPENROUTER_API_KEY is not set")
+                print(f"[reward] target {i}: OpenRouter {model_name} at "
+                      f"{self.all_target_model_url[i]} (native tool calling)", flush=True)
+                client = OpenAI(base_url=self.all_target_model_url[i], api_key=key)
+                tokenizer = None
+            elif self.is_local_openai[i]:
                 print(f"[reward] target {i}: local OpenAI-compatible {model_name} at "
                       f"{self.all_target_model_url[i]} (native tool calling)", flush=True)
                 client = OpenAI(base_url=self.all_target_model_url[i], api_key="EMPTY")
@@ -265,22 +316,25 @@ class InjecAgentToolCallingReward:
                 temperature=self.config.target_model_temperature,
             )
 
+
     def fetch_with_retries(
         self,
         client,
         messages,
         tools,
         model_name,
-        max_retries=5,
-        reasoning_effort="minimal",
+        max_retries=12,
+        reasoning_effort=None,
     ):
-        if "anthropic" in model_name.lower():
+        use_anthropic_api = isinstance(client, AnthropicBedrock)
+        if use_anthropic_api:
             messages[2] = to_anthropic_tool_call(messages[2])
             messages[3] = to_anthropic_tool_result(messages[3])
 
         for attempt in range(max_retries):
             try:
-                if "anthropic" in model_name.lower():
+                _throttle(client)   # pace to OPENROUTER_RPM; a retry is another request
+                if use_anthropic_api:
                     completion = client.messages.create(
                         model=model_name,
                         system=messages[0]["content"],
@@ -291,7 +345,10 @@ class InjecAgentToolCallingReward:
                     # Convert to openai output format
                     completion = anthropic_completion_to_openai(completion)
                 else:
-                    if "gpt-5" in model_name.lower():
+                    # Only pass the field when the run set one. A None must not reach the
+                    # SDK (it would serialise as null), and an unset effort means the target's
+                    # own default, which is what the log line at __init__ announced.
+                    if reasoning_effort and "gpt-5" in model_name.lower():
                         completion = client.chat.completions.create(
                             model=model_name,
                             messages=messages,
@@ -304,23 +361,28 @@ class InjecAgentToolCallingReward:
                         )
 
                 return completion
-            except RateLimitError as e:
-                if attempt < max_retries - 1:
-                    wait_time = 10**attempt
-                    print(
-                        f"Rate limit error encountered. Retrying in {wait_time} seconds..."
-                    )
-                    time.sleep(wait_time)
-                else:
-                    print(f"Repeated rate limit errors: {e}")
-                    raise e
             except Exception as e:
-                if hasattr(e, "message") and "expired" in e.message:
+                if hasattr(e, "message") and isinstance(getattr(e, "message", None), str) \
+                        and "expired" in e.message:
                     # Claude api token expired
                     raise e
-
-                if attempt < max_retries - 1:
-                    pass
+                # The imported RateLimitError is anthropic's, so an OpenAI/OpenRouter 429 used
+                # to fall through to the generic branch and retry with NO delay, burning every
+                # attempt in milliseconds and returning "" -- which scores as an attack failure
+                # and silently corrupts the reward. That matters enormously here: a rate-limited
+                # target (OpenRouter caps some models at 20 rpm) 429s most of a step's 80
+                # concurrent rollouts. Treat anything that looks like a rate limit as one and
+                # back off; the cumulative budget below covers a full 80-request step at 20 rpm.
+                is_rate_limit = (isinstance(e, RateLimitError)
+                                 or getattr(e, "status_code", None) == 429
+                                 or "429" in str(e) or "rate limit" in str(e).lower())
+                if is_rate_limit and attempt < max_retries - 1:
+                    wait_time = min(60, 5 * (2 ** attempt))
+                    print(f"Rate limited; retrying in {wait_time}s "
+                          f"(attempt {attempt + 1}/{max_retries})", flush=True)
+                    time.sleep(wait_time)
+                elif attempt < max_retries - 1:
+                    time.sleep(2)
                 else:
                     print(f"Skipping due to error: {e}")
                     return ""
@@ -448,7 +510,7 @@ class InjecAgentToolCallingReward:
             futures = []
 
             for i in range(len(self.all_target_client)):
-                if self.is_local_openai[i] or "/" not in self.all_target_model_name_or_path[i]:
+                if self.is_openrouter[i] or self.is_local_openai[i] or "/" not in self.all_target_model_name_or_path[i]:
                     # Native tool calling, for hosted APIs and for our own server alike.
                     futures.append(
                         executor.submit(self.run_gpt_target_model, i, user_inputs_gpt)
@@ -468,7 +530,7 @@ class InjecAgentToolCallingReward:
             for i, curr_row in enumerate(model_outputs):
                 curr_data_row = data[i]
 
-                if self.is_local_openai[j] or "/" not in self.all_target_model_name_or_path[j]:
+                if self.is_openrouter[j] or self.is_local_openai[j] or "/" not in self.all_target_model_name_or_path[j]:
                     eval_result = evaluate_output_finetuned(
                         curr_row[0],
                         curr_data_row["Attacker Tools"][0],

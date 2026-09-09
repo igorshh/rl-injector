@@ -32,7 +32,12 @@ class LocalGRPOConfig(GRPOConfig):
     soft_rewards: bool = field(default=True)
     target_model_max_completion_length: int = field(default=512)
     target_model_temperature: float = field(default=None)
-    reasoning_effort: str = field(default="minimal")  # minimal, low, medium, high
+    # None = do NOT send the field; the target runs at its own default. Set it explicitly for
+    # any run whose effort matters, with a value the TARGET supports: gpt-oss takes low|medium|
+    # high, gpt-5.6-luna takes none|low|medium|high|xhigh|max. The old default "minimal" was
+    # silently accepted by luna, which does not support it and treated it as low (measured by
+    # reasoning tokens, sep09), so a run labelled minimal was in fact a low-effort run.
+    reasoning_effort: Optional[str] = field(default=None)
     model_wise_reward_weights: Optional[list[float]] = field(default=None)
 
 
@@ -49,7 +54,12 @@ class EvalConfig:
     # EvalConfig lacked this while LocalGRPOConfig has it, so a target that is an
     # OpenAI-compatible endpoint could be trained against but not evaluated against.
     target_model_url: str = field(default="http://localhost:8000/v1")
-    reasoning_effort: str = field(default="minimal")  # minimal, low, medium, high
+    # None = do NOT send the field; the target runs at its own default. Set it explicitly for
+    # any run whose effort matters, with a value the TARGET supports: gpt-oss takes low|medium|
+    # high, gpt-5.6-luna takes none|low|medium|high|xhigh|max. The old default "minimal" was
+    # silently accepted by luna, which does not support it and treated it as low (measured by
+    # reasoning tokens, sep09), so a run labelled minimal was in fact a low-effort run.
+    reasoning_effort: Optional[str] = field(default=None)
     attacker_model_dtype: str = "bfloat16"
     target_model_dtype: str = "bfloat16"
     temperature: float = None
