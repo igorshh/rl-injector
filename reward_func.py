@@ -153,6 +153,28 @@ def _throttle(client) -> None:
         time.sleep(wait)
 
 
+
+def first_message(completion, where: str):
+    """The first choice's message, or None when the target returned no usable choice.
+
+    fetch_with_retries returns "" after exhausting retries, and OpenRouter can return a 200
+    whose body carries an ``error`` and ``choices: null`` (upstream provider failure). Both
+    used to reach ``completion.choices[0]`` and kill the whole training run (job 110688 died
+    at step 961/1240 on a single such response). Log the payload once and let the caller score
+    it as "no output".
+    """
+    choices = getattr(completion, "choices", None)
+    if not choices:
+        err = getattr(completion, "error", None)
+        try:
+            raw = completion.model_dump() if hasattr(completion, "model_dump") else completion
+        except Exception:  # pragma: no cover - defensive
+            raw = completion
+        print(f"[{where}] target returned no choices; scoring as no output. error={err!r} payload={str(raw)[:400]}",
+              flush=True)
+        return None
+    return choices[0].message
+
 class InjecAgentToolCallingReward:
     def __init__(self, config):
         self.__name__ = "InjecAgentToolCallingReward"
@@ -407,8 +429,13 @@ class InjecAgentToolCallingReward:
         target_model_output_texts = []
         target_model_output_tool_calls = []
         for completion in all_completions:
-            target_model_output_texts.append(completion.choices[0].message.content)
-            tool_calls = completion.choices[0].message.tool_calls
+            message = first_message(completion, "reward")
+            if message is None:
+                target_model_output_texts.append("")
+                target_model_output_tool_calls.append(None)
+                continue
+            target_model_output_texts.append(message.content)
+            tool_calls = message.tool_calls
             if isinstance(tool_calls, List):
                 tool_calls = [item.model_dump() for item in tool_calls]
             target_model_output_tool_calls.append(tool_calls)

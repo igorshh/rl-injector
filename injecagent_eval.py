@@ -103,12 +103,34 @@ def _throttle(client) -> None:
         time.sleep(wait)
 
 
+
+def first_message(completion, where: str):
+    """The first choice's message, or None when the target returned no usable choice.
+
+    fetch_with_retries returns "" after exhausting retries, and OpenRouter can return a 200
+    whose body carries an ``error`` and ``choices: null`` (upstream provider failure). Both
+    used to reach ``completion.choices[0]`` and kill the whole training run (job 110688 died
+    at step 961/1240 on a single such response). Log the payload once and let the caller score
+    it as "no output".
+    """
+    choices = getattr(completion, "choices", None)
+    if not choices:
+        err = getattr(completion, "error", None)
+        try:
+            raw = completion.model_dump() if hasattr(completion, "model_dump") else completion
+        except Exception:  # pragma: no cover - defensive
+            raw = completion
+        print(f"[{where}] target returned no choices; scoring as no output. error={err!r} payload={str(raw)[:400]}",
+              flush=True)
+        return None
+    return choices[0].message
+
 def fetch_with_retries(
     client,
     messages,
     tools,
     model_name,
-    max_retries=8,
+    max_retries=int(os.environ.get("OPENROUTER_MAX_RETRIES", "20")),
     reasoning_effort=None,
 ):
     use_anthropic_api = isinstance(client, AnthropicBedrock)
@@ -483,7 +505,12 @@ def main():
             # reasoning_content without this code having to know the field names.
             target_messages = []
             for completion in all_completions:
-                message = completion.choices[0].message
+                message = first_message(completion, "eval")
+                if message is None:
+                    target_model_output_texts.append("")
+                    target_model_output_tool_calls.append(None)
+                    target_messages.append({"content": None, "tool_calls": None, "error": "no choices returned"})
+                    continue
                 target_model_output_texts.append(message.content)
                 tool_calls = message.tool_calls
                 if isinstance(tool_calls, List):
