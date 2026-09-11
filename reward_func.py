@@ -382,6 +382,13 @@ class InjecAgentToolCallingReward:
                             model=model_name, messages=messages, tools=tools
                         )
 
+
+                # OpenRouter reports upstream failures as a 200 whose body has choices=None and
+                # an error dict (seen: 504 "The operation was aborted", error_type timeout).
+                # That is a transport failure, not a target response: retry it like any other
+                # error instead of letting the caller score it as "attack failed".
+                if getattr(completion, "choices", None) is None and getattr(completion, "error", None):
+                    raise RuntimeError(f"target returned no choices: {completion.error}")
                 return completion
             except Exception as e:
                 if hasattr(e, "message") and isinstance(getattr(e, "message", None), str) \
